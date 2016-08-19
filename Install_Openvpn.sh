@@ -1,5 +1,21 @@
 #!/bin/bash
 
+PEM_FILE_PATH=/usr/bin/PEM/Von-Connect-Key.pem
+OpenVPN_Home=/usr/local/openvpn
+OpenVPN_Binary_Path=/usr/local/openvpn/sbin/openvpn
+Tar_Extract_Folder=/tmp/openvpn/
+OpenVPN_Version_Command="$OpenVPN_Binary_Path --version"
+OpenVPN_KEY_Directory=/etc/openvpn/keys/
+OpenVPN_Symlink_Path=/usr/bin/openvpn
+PID_FILE=/etc/openvpn/keys/pid
+
+##Variables to add routing entry i.e this ip will will route their traffic through tunnel(tun0) rather then default device (eth0)
+
+IP_Routed="12.0.7.6"
+network_ip_vpn="10.8.0"
+tunnnel_interface="tun0"
+
+install_openvpn(){
 #Check whether root user is running the script
 if [ "$(id -u)" != "0" ]; then
    echo "This script must be run as root" 1>&2
@@ -9,13 +25,13 @@ fi
 echo -e "Going to install OpenVpn...\n"
 echo -e  "Installing required dependencies\n"
 
-PEM_FILE_PATH=/usr/bin/PEM/Von-Connect-Key.pem
-OpenVPN_Home=/usr/local/openvpn
-OpenVPN_Binary_Path=/usr/local/openvpn/sbin/openvpn
-Tar_Extract_Folder=/tmp/openvpn/
-OpenVPN_Version_Command="$OpenVPN_Binary_Path --version"
-OpenVPN_KEY_Directory=/etc/openvpn/keys/
-OpenVPN_Symlink_Path=/usr/bin/openvpn
+#PEM_FILE_PATH=/usr/bin/PEM/Von-Connect-Key.pem
+#OpenVPN_Home=/usr/local/openvpn
+#OpenVPN_Binary_Path=/usr/local/openvpn/sbin/openvpn
+#Tar_Extract_Folder=/tmp/openvpn/
+#OpenVPN_Version_Command="$OpenVPN_Binary_Path --version"
+#OpenVPN_KEY_Directory=/etc/openvpn/keys/
+#OpenVPN_Symlink_Path=/usr/bin/openvpn
 
 yum install -y pam-devel gcc gcc-c++ openssl-devel lzo-devel
 if [ -e ./openvpn-2.3.11.tar.gz ]; then
@@ -48,7 +64,6 @@ else
 		tar -zxvf openvpn-2.3.11.tar.gz -C $Tar_Extract_Folder
 	fi
 echo -e "Begining to Install Openvpn\n"
-
 mkdir -p $OpenVPN_Home
 cd $Tar_Extract_Folder/openvpn-2.3.11/
 ./configure --prefix=$OpenVPN_Home
@@ -57,10 +72,12 @@ make install
 
 #Check whether symlink is present or not, if not then create one
 #ln -s /path/to/file /path/to/symlink
-if [ -L $OpenVPN_Symlink_Path ]; then 
+if [ -L $OpenVPN_Symlink_Path ]; then
 	echo -e "Symlink for openvpn already exsists ..."
+	rm -rf $Tar_Extract_Folder
 else
 	ln -s $OpenVPN_Binary_Path $OpenVPN_Symlink_Path
+	rm -rf $Tar_Extract_Folder
 fi
 
 ## Check whether installation worked properly
@@ -76,7 +93,7 @@ fi
 echo -e "\nChecking for keys and certificates ...\n"
 ## Code to Bring keys.tar from vpn server
 
-if [ -d $OpenVPN_KEY_Directory ]; then 
+if [ -d $OpenVPN_KEY_Directory ]; then
 	echo -e "\n $OpenVPN_KEY_Directory is present ... Checking for required client.key , client.conf ,client.crt and ca.crt files\n"
 else
 	mkdir -p $OpenVPN_KEY_Directory
@@ -96,10 +113,108 @@ else
 	cd  $OpenVPN_KEY_Directory
 	tar -xvf  keys.tar
 fi
-
+}
 ##Clean up After Installation
 
+start_openvpn(){
+OpenVpn_Proces=(`ps -ef | grep openvpn | grep -v grep |awk '{print $2}'`)
 
- echo -e "\n Installation is complete with all instraller and configuration files in place \n"
- echo -e "\n OpenVpn Canm be connected using below Command : \n"
- echo -e "\n openvpn $OpenVPN_KEY_Directory/client.conf"
+Number_Of_OpenVpn_Tunnels=`ifconfig | grep 10.8.0 | wc -l`
+
+echo "Number_Of_OpenVpn_Tunnels = $Number_Of_OpenVpn_Tunnels"
+
+Number_Of_OpenVpn_Proces="${#OpenVpn_Proces[@]}"
+
+if [ $Number_Of_OpenVpn_Tunnels == "0" ];then
+if [ -f "$OpenVPN_Binary_Path" ]; then
+	echo "In start openvpn"
+	$OpenVPN_Binary_Path $OpenVPN_KEY_Directory/client.conf &
+	echo $!  > $PID_FILE
+else
+	echo "NO openvpn found at path $OpenVPN_Binary_Path "
+	while true; do
+   	 	read -p "Do you wish to install OpenVPN? [y/n] :" yn
+    		case $yn in
+        	[Yy]* ) install_openvpn
+			if [ -f "$OpenVPN_Binary_Path" ];then
+				$OpenVPN_Binary_Path $OpenVPN_KEY_Directory/client.conf &
+				echo $!  > $PID_FILE
+				break
+			else
+				echo "It seems Installation didn't work out"
+				echo "Plaese check with System administrator"
+				break
+			fi;;
+        	[Nn]* ) exit;;
+        	* ) echo "Please answer yes or no.";;
+    	esac
+	done
+fi
+else
+	echo "Already a vpn tunnel has been established"
+	exit 1
+fi
+}
+
+add_route(){
+IP_Array=(`ifconfig  | awk '/10.8.0/{print substr($3,7)}'`)
+Total_tunnels="${#IP_Array[@]}"
+tunnnel_interface="tun0"
+if [ $Total_tunnels == "1" ];then
+			echo "`route add -host $IP_Routed gw ${IP_Array[0]} dev $tunnnel_interface`"
+else
+		echo "There are multiple VPN connection to same vpn server please remove all and only keep one connection active to single vpn server"
+fi
+}
+
+stop_openvpn(){
+echo "Stopping Openvpn ..."
+OpenVpn_Proces=(`ps -ef | grep openvpn | grep -v grep |awk '{print $2}'`)
+
+Number_Of_OpenVpn_Tunnels=`ifconfig | grep 10.8.0 | wc -l`
+if [ $Number_Of_OpenVpn_Tunnels == "1" ];then
+	if [ -f $PID_FILE ];then
+		kill -9 "`cat $PID_FILE`"
+		rm -f $PID_FILE
+	else
+		echo "Openvpn process is runnig however pid file is missing "
+		echo "try to kill the openvpn process manually"
+	fi
+else
+	echo "OpenVpn is not running"
+fi
+}
+
+usage(){
+echo ""
+echo "[start | --start]  	to start openvpn"
+echo "[stop | --stop] 		to stop openvpn"
+echo "[install | --install] 	to install openvpn"
+echo "[help | --help | -help] 	for help "
+echo ""
+echo "EXAMPLE:"
+echo -e "./Install_Openvpn --start to start openvpn\n"
+}
+
+if [ "$1" != "" ]; then
+    case $1 in
+        install | --install )   install_openvpn
+                                ;;
+        start | --start )    start_openvpn
+				sleep 15
+                                add_route
+                                ;;
+        help | --help | -help )           usage
+                                exit
+                                ;;
+	stop | --stop )		stop_openvpn
+				;;
+        * )                     usage
+                                exit 1
+    esac
+    shift
+else
+	echo -e "\nPlease provide parameter"
+	usage
+fi
+
